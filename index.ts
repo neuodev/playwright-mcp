@@ -43,7 +43,10 @@ server.registerTool(
   "screenshot_current_page",
   {
     description:
-      "Takes a screenshot of the current browser page and returns it as an image. Optionally saves it to disk if a path is provided.",
+      "Takes a screenshot of the current browser page and returns it as an image. " +
+      "Optionally saves it to disk if a path is provided. " +
+      "Use this proactively when working on UI code (React, Angular, Vue, or any frontend) " +
+      "to visually verify how changes look in the browser in real time — don't wait to be asked.",
     inputSchema: {
       path: z
         .string()
@@ -246,7 +249,47 @@ server.registerTool(
   },
 );
 
-// 8. Start the Server
+// 8. Type in Element Tool
+server.registerTool(
+  "type_in_element",
+  {
+    description: "Types text into an input or textarea element using a CSS selector",
+    inputSchema: {
+      selector: z
+        .string()
+        .describe(
+          "CSS selector of the input or textarea element (e.g. 'input#search', 'textarea.notes')",
+        ),
+      text: z.string().describe("The text to type into the element"),
+    },
+  },
+  async ({ selector, text }) => {
+    if (!currentPage) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: "No browser page is open. Use open_url_in_browser first.",
+          },
+        ],
+        isError: true,
+      };
+    }
+
+    await currentPage.locator(selector).fill(text);
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: `Typed text into element matching selector: ${selector}`,
+        },
+      ],
+    };
+  },
+);
+
+// 9. Start the Server
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
