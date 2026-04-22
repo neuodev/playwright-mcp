@@ -1,7 +1,17 @@
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { chromium, type Page, type Browser } from "playwright";
+import { chromium, type Page, type BrowserContext } from "playwright";
+import { homedir } from "node:os";
+import { join } from "node:path";
+
+// Use the real Chrome profile so the agent inherits existing logins.
+// Change PROFILE_DIRECTORY to "Profile 1", "Profile 2", etc. to pick a different profile.
+const CHROME_USER_DATA_DIR = join(
+  homedir(),
+  "Library/Application Support/Google/Chrome",
+);
+const PROFILE_DIRECTORY = "Agent";
 
 // 1. Create the MCP Server
 const server = new McpServer({
@@ -10,8 +20,19 @@ const server = new McpServer({
 });
 
 // Shared browser state across tools
-let browser: Browser | null = null;
+let context: BrowserContext | null = null;
 let currentPage: Page | null = null;
+
+async function getContext(): Promise<BrowserContext> {
+  if (context) return context;
+  context = await chromium.launchPersistentContext(CHROME_USER_DATA_DIR, {
+    channel: "chrome",
+    headless: false,
+    viewport: null,
+    args: [`--profile-directory=${PROFILE_DIRECTORY}`],
+  });
+  return context;
+}
 
 // 2. Open URL Tool
 server.registerTool(
@@ -23,8 +44,8 @@ server.registerTool(
     },
   },
   async ({ url }) => {
-    if (!browser) browser = await chromium.launch({ headless: true });
-    currentPage = await browser.newPage();
+    const ctx = await getContext();
+    currentPage = await ctx.newPage();
     await currentPage.goto(url);
 
     return {
@@ -253,7 +274,8 @@ server.registerTool(
 server.registerTool(
   "type_in_element",
   {
-    description: "Types text into an input or textarea element using a CSS selector",
+    description:
+      "Types text into an input or textarea element using a CSS selector",
     inputSchema: {
       selector: z
         .string()
