@@ -35,3 +35,7 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 
 # Agents
 .cursor
+
+# Playwright MCP browser state
+playwright-profile
+browser-state.json

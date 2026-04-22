@@ -1,17 +1,17 @@
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { chromium, type Page, type BrowserContext } from "playwright";
-import { homedir } from "node:os";
+import { chromium } from "playwright-extra";
+import type { Page, BrowserContext } from "playwright";
+import StealthPlugin from "puppeteer-extra-plugin-stealth";
 import { join } from "node:path";
 
-// Use the real Chrome profile so the agent inherits existing logins.
-// Change PROFILE_DIRECTORY to "Profile 1", "Profile 2", etc. to pick a different profile.
-const CHROME_USER_DATA_DIR = join(
-  homedir(),
-  "Library/Application Support/Google/Chrome",
-);
-const PROFILE_DIRECTORY = "Agent";
+chromium.use(StealthPlugin());
+
+// Dedicated profile for Playwright's bundled Chromium — isolated from the user's
+// real Chrome so sessions/cookies persist without conflicting with anything.
+const USER_DATA_DIR = join(import.meta.dir, "playwright-profile");
+const STATE_BACKUP_PATH = join(import.meta.dir, "browser-state.json");
 
 // 1. Create the MCP Server
 const server = new McpServer({
@@ -23,15 +23,41 @@ const server = new McpServer({
 let context: BrowserContext | null = null;
 let currentPage: Page | null = null;
 
-async function getContext(): Promise<BrowserContext> {
+async function safe<T>(
+  promise: Promise<T> | undefined,
+): Promise<T | undefined> {
+  if (!promise) return undefined;
+  try {
+    return await promise;
+  } catch {
+    return undefined;
+  }
+}
+
+async function getContext(headless: boolean = true): Promise<BrowserContext> {
   if (context) return context;
-  context = await chromium.launchPersistentContext(CHROME_USER_DATA_DIR, {
-    channel: "chrome",
-    headless: false,
+  context = await chromium.launchPersistentContext(USER_DATA_DIR, {
+    headless,
     viewport: null,
-    args: [`--profile-directory=${PROFILE_DIRECTORY}`],
+    ignoreDefaultArgs: ["--enable-automation"],
+    args: ["--disable-blink-features=AutomationControlled"],
+  });
+  context.on("close", () => {
+    context = null;
+    currentPage = null;
   });
   return context;
+}
+
+async function persistState(): Promise<void> {
+  await safe(context?.storageState({ path: STATE_BACKUP_PATH }));
+}
+
+async function closeBrowser(): Promise<void> {
+  await safe(currentPage?.close());
+  currentPage = null;
+  await safe(context?.close());
+  context = null;
 }
 
 // 2. Open URL Tool
@@ -47,6 +73,7 @@ server.registerTool(
     const ctx = await getContext();
     currentPage = await ctx.newPage();
     await currentPage.goto(url);
+    await persistState();
 
     return {
       content: [
@@ -91,6 +118,7 @@ server.registerTool(
     }
 
     const buffer = await currentPage.screenshot({ type: "png", path });
+    await persistState();
 
     return {
       content: [
@@ -140,6 +168,7 @@ server.registerTool(
     }
 
     await currentPage.setViewportSize({ width, height });
+    await persistState();
 
     return {
       content: [
@@ -185,6 +214,7 @@ server.registerTool(
     }
 
     await currentPage.mouse.wheel(deltaX, deltaY);
+    await persistState();
 
     return {
       content: [
@@ -218,6 +248,7 @@ server.registerTool(
     }
 
     const html = await currentPage.content();
+    await persistState();
 
     return {
       content: [
@@ -258,6 +289,7 @@ server.registerTool(
     }
 
     await currentPage.locator(selector).click();
+    await persistState();
 
     return {
       content: [
@@ -299,6 +331,7 @@ server.registerTool(
     }
 
     await currentPage.locator(selector).fill(text);
+    await persistState();
 
     return {
       content: [
@@ -311,7 +344,63 @@ server.registerTool(
   },
 );
 
-// 9. Start the Server
+// 9. Cleanup Tool
+server.registerTool(
+  "cleanup",
+  {
+    description:
+      "Closes the current page and browser context, flushing session state to disk. " +
+      "Call this when you are done using the browser, or after a manual login session.",
+    inputSchema: {},
+  },
+  async () => {
+    await persistState();
+    await closeBrowser();
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: "Browser and page closed.",
+        },
+      ],
+    };
+  },
+);
+
+// 10. Manual Login Tool
+server.registerTool(
+  "open_browser_for_manual_login",
+  {
+    description:
+      "Opens the browser in headful (visible) mode and navigates to the given URL so the user can log in manually. " +
+      "The cookies and local storage captured during the session will persist across future tool calls. " +
+      "Once the user has finished logging in, they should call the cleanup tool to close the browser.",
+    inputSchema: {
+      url: z
+        .url()
+        .describe("The URL to open for manual login (e.g. the site's sign-in page)"),
+    },
+  },
+  async ({ url }) => {
+    await closeBrowser();
+    const ctx = await getContext(false);
+    currentPage = await ctx.newPage();
+    await currentPage.goto(url);
+    await persistState();
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: `Opened ${url} in a visible browser window. Log in manually, then call the cleanup tool when done.`,
+        },
+      ],
+    };
+  },
+);
+
+// 11. Start the Server
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
